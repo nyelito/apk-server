@@ -1,0 +1,9 @@
+{
+  "name": "apk-server",
+  "version": "1.0.0",
+  "description": "Lightweight HTTP server for hosting APK files and screenshots over LAN",
+  "bin": {
+    "apk-serve": "./serve.js"
+  },
+  "license": "MIT"
+}
