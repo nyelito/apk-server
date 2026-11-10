@@ -80,6 +80,7 @@ const mimeTypes = {
   '.png': 'image/png',
   '.gif': 'image/gif',
   '.apk': 'application/vnd.android.package-archive',
+  '.m4a': 'audio/mp4',
 };
 
 function getApkInfo(apkDir, apkName) {
@@ -104,11 +105,25 @@ function getLatestScreenshot(screenshotDir) {
 }
 
 const options = parseArgs();
+const logFile = path.join(__dirname, 'device.log');
 
 const server = http.createServer((req, res) => {
   const ip = getLocalIP();
   const apks = getApkList(options.apkDir);
   const screenshot = getLatestScreenshot(options.screenshotDir);
+
+  if (req.method === 'POST' && req.url === '/log') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      const line = `[${new Date().toISOString()}] ${body}\n`;
+      fs.appendFileSync(logFile, line);
+      process.stdout.write(line);
+      res.writeHead(204);
+      res.end();
+    });
+    return;
+  }
 
   if (req.url === '/' || req.url === '/index.html') {
     let apkCards = '';
@@ -179,14 +194,46 @@ const server = http.createServer((req, res) => {
   const ext = path.extname(filePath).toLowerCase();
   const contentType = mimeTypes[ext] || 'application/octet-stream';
 
-  fs.readFile(filePath, (err, data) => {
+  // Stream with an explicit Content-Length: without it, phone browsers can't tell when a
+  // download is complete and may hang at the end (especially through a tunnel).
+  fs.stat(filePath, (err, stats) => {
     if (err) {
       res.writeHead(500);
       res.end('Error reading file');
       return;
     }
-    res.writeHead(200, { 'Content-Type': contentType });
-    res.end(data);
+    const headers = { 'Content-Type': contentType, 'Accept-Ranges': 'bytes' };
+    if (ext === '.apk') {
+      headers['Content-Disposition'] = `attachment; filename="${path.basename(filePath)}"`;
+      headers['Cache-Control'] = 'no-store';
+    }
+    // Phone download managers resume and probe with Range requests; answer them properly (206).
+    let start = 0;
+    let end = stats.size - 1;
+    let status = 200;
+    const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
+    if (range && (range[1] || range[2])) {
+      if (range[1]) { start = parseInt(range[1], 10); if (range[2]) end = Math.min(end, parseInt(range[2], 10)); }
+      else { start = Math.max(0, stats.size - parseInt(range[2], 10)); }
+      if (start > end || start >= stats.size) {
+        res.writeHead(416, { 'Content-Range': `bytes */${stats.size}` });
+        res.end();
+        return;
+      }
+      status = 206;
+      headers['Content-Range'] = `bytes ${start}-${end}/${stats.size}`;
+    }
+    headers['Content-Length'] = end - start + 1;
+    res.writeHead(status, headers);
+    if (req.method === 'HEAD') { res.end(); return; }
+    let sent = 0;
+    fs.createReadStream(filePath, { start, end })
+      .on('data', chunk => { sent += chunk.length; })
+      .on('error', () => res.destroy())
+      .pipe(res);
+    res.on('close', () => {
+      if (ext === '.apk') console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} ${status} range=${req.headers.range || '-'} sent=${sent}/${end - start + 1} finished=${res.writableFinished} ua="${(req.headers['user-agent'] || '').slice(0, 80)}"`);
+    });
   });
 });
 
