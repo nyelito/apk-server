@@ -1,1 +1,4 @@
 node_modules/
+device.log
+dist/
+screenshots/
